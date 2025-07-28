@@ -34,11 +34,17 @@ class AStorageVecDB():
         self.buffersLock = Lock()
         self.hippocampus = Thread(target=self.Hippocampus, args=())
         self.hippocampus.start()
+
+        # Caching initialization
+        self.cache = VectorCache(size=10000)
+        self._cached_vectors = {}
+        self._query_cache = {}
         return
 
     def ModuleInfo(self):
         return {"NAME": "storage", "ACTIONS": {}}
 
+    @lru_cache(maxsize=1024)
     def CalcEmbeddings(self, txts: list[str]):
         global model, modelLock
         with modelLock:
@@ -132,6 +138,10 @@ class AStorageVecDB():
                 self.data["collections"][collection] = dict()
                 with self.buffersLock:
                     self.buffers[collection]={"texts": [], "lock": Lock()}
+
+            # Check cache first
+            if content in self._cached_vectors:
+                return True
             
             texts = [content] if type(content) != list else content
             with self.buffers[collection]['lock']:
@@ -145,6 +155,14 @@ class AStorageVecDB():
         try:
             if collection not in self.data["collections"]:
                 return []
+
+            # Generate cache key
+            cache_key = (collection, clue, tuple(keywords), num_results)
+
+            # Check query cache first
+            cached_result = self._query_cache.get(cache_key)
+            if cached_result:
+                return cached_result
             
             while (collection in self.buffers) and (len(self.buffers[collection]['texts']) > 0):
                 time.sleep(0.1)
@@ -155,11 +173,17 @@ class AStorageVecDB():
             
             if clue in ["", None]:
                 results = [(r, -1.0) for r in results]
+
+                # Cache the result
+                self._query_cache[cache_key] = results[:num_results] if num_results > 0 else results
                 return results[:num_results] if num_results > 0 else results
 
             query = self.CalcEmbeddings([clue])[0]
             temp = [(txt, np.sum((self.data["collections"][collection][txt]-query)**2,axis=0)[()]) for txt in results]
             ret = sorted(temp, key=lambda x: x[1])[:num_results] if num_results > 0 else temp
+
+            # Cache the result
+            self._query_cache[cache_key] = ret
             print("query: ", collection, ".", clue, " -> ", ret)
             return ret
         except Exception as e:
